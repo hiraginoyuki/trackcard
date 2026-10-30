@@ -53,7 +53,7 @@ private final class DisplayLinkThread: Thread, @unchecked Sendable {
     init(link: CADisplayLink) {
         self.link = link
         super.init()
-        name = "Trackpad Preview Display"
+        name = "Trackcard Display"
         qualityOfService = .userInteractive
     }
 

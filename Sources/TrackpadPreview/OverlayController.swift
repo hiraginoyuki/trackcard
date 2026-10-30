@@ -89,7 +89,7 @@ final class OverlayController {
         self.adjustment = adjustment ?? PreviewAdjustmentController()
         panel = PreviewPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                              backing: .buffered, defer: false)
-        panel.title = "Trackpad Preview"
+        panel.title = "Trackcard"
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
@@ -208,7 +208,7 @@ final class OverlayController {
         if !offscreen {
             if provisionalClone == nil {
                 let clone = OverlayController(offscreen: true)
-                clone.panel.title = "Provisional Trackpad Preview"
+                clone.panel.title = "Provisional Trackcard"
                 provisionalClone = clone
             }
             provisionalClone?.setDevices(devices)
@@ -394,7 +394,7 @@ final class OverlayController {
             cloneIsFading = false
             if provisionalClone == nil {
                 let clone = OverlayController(offscreen: true)
-                clone.panel.title = "Provisional Trackpad Preview"
+                clone.panel.title = "Provisional Trackcard"
                 provisionalClone = clone
             }
             if let clone = provisionalClone {
@@ -439,8 +439,8 @@ final class OverlayController {
         opacityMotion = clone.opacityMotion
         opacityMotion.retarget(to: currentOpacity)
         classificationTransitionUntil = 0
-        panel.title = "Trackpad Preview"; panel.gestureTarget = gestureView
-        clone.panel.title = "Provisional Trackpad Preview"; clone.panel.gestureTarget = clone.gestureView
+        panel.title = "Trackcard"; panel.gestureTarget = gestureView
+        clone.panel.title = "Provisional Trackcard"; clone.panel.gestureTarget = clone.gestureView
         clone.panel.orderOut(nil)
         configureGestureView(); clone.configureGestureView()
         clone.gestureView.setContactTracking(false, transforming: false)
@@ -869,7 +869,7 @@ final class OverlayController {
                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                   isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
               let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else {
-            throw NSError(domain: "TrackpadPreview.Snapshot", code: 1,
+            throw NSError(domain: "Trackcard.Snapshot", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "No display or bitmap context is available."])
         }
         CATransaction.flush()
@@ -890,7 +890,7 @@ final class OverlayController {
         deck.sublayers = originalCards
         CATransaction.commit()
         guard let png = bitmap.representation(using: .png, properties: [:]) else {
-            throw NSError(domain: "TrackpadPreview.Snapshot", code: 2,
+            throw NSError(domain: "Trackcard.Snapshot", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "Could not encode the overlay as PNG."])
         }
         try png.write(to: url, options: .atomic)

@@ -185,7 +185,7 @@ struct TPMonitor {
         std::promise<void> ready;
         auto started = ready.get_future();
         worker = std::thread([this, &ready] {
-            pthread_setname_np("Trackpad Preview Capture");
+            pthread_setname_np("Trackcard Capture");
             runLoop = CFRunLoopGetCurrent();
             CFRunLoopSourceContext context = {};
             context.info = this;

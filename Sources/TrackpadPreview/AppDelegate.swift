@@ -29,9 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         demoStart = ProcessInfo.processInfo.systemUptime
         if !demo { capture = TrackpadCapture() }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "rectangle.and.hand.point.up.left", accessibilityDescription: "Trackpad Preview")
-            ?? NSImage(systemSymbolName: "hand.draw", accessibilityDescription: "Trackpad Preview")
-        statusItem.button?.toolTip = "Trackpad Preview"
+        statusItem.button?.image = NSImage(systemSymbolName: "rectangle.and.hand.point.up.left", accessibilityDescription: "Trackcard")
+            ?? NSImage(systemSymbolName: "hand.draw", accessibilityDescription: "Trackcard")
+        statusItem.button?.toolTip = "Trackcard"
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         overlay.setDevices(devices)
         recorder?.setDevices(devices)
-        statusItem.button?.toolTip = devices.isEmpty ? (capture?.error ?? "No trackpads connected") : "Trackpad Preview · \(devices.count) connected"
+        statusItem.button?.toolTip = devices.isEmpty ? (capture?.error ?? "No trackpads connected") : "Trackcard · \(devices.count) connected"
     }
 
     private func restartFrameLoop() {
@@ -181,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        addItem("Trackpad Preview\(demo ? " · Demo" : "")", to: menu).isEnabled = false
+        addItem("Trackcard\(demo ? " · Demo" : "")", to: menu).isEnabled = false
         if devices.isEmpty {
             addItem(capture?.error ?? "No trackpads connected", to: menu).isEnabled = false
         }
@@ -224,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addItem("Record Gestures…", action: #selector(showRecorder), to: menu).isEnabled = !demo
         addItem("Compare Classifiers…", action: #selector(showClassifiers), to: menu).isEnabled = !demo
         menu.addItem(.separator())
-        addItem("Quit Trackpad Preview", action: #selector(quit), to: menu).keyEquivalent = "q"
+        addItem("Quit Trackcard", action: #selector(quit), to: menu).keyEquivalent = "q"
     }
 
     @discardableResult

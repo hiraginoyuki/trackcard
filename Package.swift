@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "TrackpadPreview",
+    name: "Trackcard",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "TrackpadPreview", targets: ["TrackpadPreview"])],
+    products: [.executable(name: "Trackcard", targets: ["TrackpadPreview"])],
     targets: [
         .target(
             name: "TrackpadBridge",
