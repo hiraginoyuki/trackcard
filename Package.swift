@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "TrackpadPreview",
     platforms: [.macOS(.v14)],
-    products: [.library(name: "TrackpadCore", targets: ["TrackpadCore"])],
+    products: [.executable(name: "TrackpadPreview", targets: ["TrackpadPreview"])],
     targets: [
         .target(
             name: "TrackpadBridge",
@@ -12,7 +12,7 @@ let package = Package(
             linkerSettings: [.linkedFramework("CoreFoundation"), .linkedFramework("IOKit")]
         ),
         .target(name: "TrackpadCore"),
-        .target(
+        .executableTarget(
             name: "TrackpadPreview",
             dependencies: ["TrackpadBridge", "TrackpadCore"],
             linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("QuartzCore")]
