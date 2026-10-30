@@ -57,6 +57,7 @@ struct GestureMeasurements: Sendable {
     let netAlignment: Double
     let features: VelocityTiltFeatures?
     let tiltPrior: Double
+    let peakRadialSpeed: Double
 
     var logSpacing: Double { log(distance / initialDistance) }
     var rotationStrength: Double { abs(angle) / (Self.geometryTiltDegrees * .pi / 180) * tiltPrior }
@@ -68,7 +69,7 @@ struct GestureMeasurements: Sendable {
         [.minimum("Spacing change", abs(logSpacing), Self.geometryPinchLogSpacing),
          .minimum("Radial travel", pinchMotion, 0.5, "mm")]
     }
-    var tiltGeometryChecks: [GestureClassifierCheck] {
+    var baseTiltGeometryChecks: [GestureClassifierCheck] {
         var checks: [GestureClassifierCheck] = [
             .minimum("Turn angle after prior", abs(angle) * 180 / .pi * tiltPrior, Self.geometryTiltDegrees, "°"),
             .minimum("Angular travel", rotationMotion, 0.5, "mm"),
@@ -79,8 +80,34 @@ struct GestureMeasurements: Sendable {
         }
         return checks
     }
+    var tiltGeometryChecks: [GestureClassifierCheck] {
+        var checks = baseTiltGeometryChecks
+        // Incidental angle change can be large during a pinch. Compare travel
+        // in millimeters instead of treating degrees as an independent win.
+        if configuration.usesMotionBoundary {
+            checks.append(.minimum("Angular versus radial travel", rotationMotion, pinchMotion * 0.7, "mm"))
+        }
+        return checks
+    }
+    var developingTurnChecks: [GestureClassifierCheck] {
+        // A turn may follow radial setup. Keep this recovery separate from
+        // the travel-ratio fallback: radial motion must ease while meaningful
+        // tangential motion continues in the net turn's direction.
+        baseTiltGeometryChecks + [
+            .gate("Motion boundary enabled", configuration.usesMotionBoundary),
+            .minimum("Prior radial speed", peakRadialSpeed, 12, "mm/s"),
+            .maximum("Radial speed after easing", abs(features?.radialVelocity ?? 0), peakRadialSpeed * 0.6, "mm/s"),
+            .minimum("Tangential speed", abs(features?.tangentialVelocity ?? 0), 12, "mm/s"),
+            .minimum("Tangential versus radial speed", abs(features?.tangentialVelocity ?? 0), abs(features?.radialVelocity ?? 0) * 0.7, "mm/s"),
+            .gate("Angular velocity agrees with turn direction", (features?.angularVelocity ?? 0) * angle > 0)
+        ]
+    }
     var geometryTiltPossible: Bool { tiltGeometryChecks.allSatisfy(\.passed) }
+    var developingTurnPossible: Bool { developingTurnChecks.allSatisfy(\.passed) }
     var geometryPinchPossible: Bool { pinchGeometryChecks.allSatisfy(\.passed) }
+    var tiltSpacingChecks: [GestureClassifierCheck] {
+        geometryPinchPossible ? [.minimum("Turn versus spacing strength", rotationStrength, pinchStrength * 0.9)] : []
+    }
     // Both geometry fallbacks inspect a window of meaningful physical motion.
     // Spacing can establish that observation window before a turn develops;
     // each fallback still requires its own continuous 32 ms eligibility.
@@ -128,8 +155,9 @@ extension GestureClassifier {
             // A spacing-led start can develop into a turn. This local geometry
             // condition retains that ambiguity protection without depending on
             // the readiness or confidence of any Tilt classifier.
-            if input.geometryTiltPossible {
-                checks.append(Check(name: "Turn ambiguity", value: input.rotationStrength, comparison: .below,
+            if input.geometryTiltPossible || input.developingTurnPossible {
+                let name = input.geometryTiltPossible ? "Turn ambiguity" : "Developing turn ambiguity"
+                checks.append(Check(name: name, value: input.rotationStrength, comparison: .below,
                                     threshold: input.pinchStrength * 0.9, unit: ""))
             }
             return make(checks, duration: 0.032, direction: input.radialDirection,
@@ -156,11 +184,13 @@ extension GestureClassifier {
             return make(checks, duration: decisive ? 0.008 : 0.024, direction: input.turnDirection)
 
         case .geometryTilt:
-            var checks = input.tiltGeometryChecks
-            if input.geometryPinchPossible {
-                checks.append(.minimum("Turn versus spacing strength", input.rotationStrength, input.pinchStrength * 0.9))
-            }
-            return make(checks, duration: 0.032, direction: input.angle > 0 ? 1 : -1,
+            return make(input.tiltGeometryChecks + input.tiltSpacingChecks,
+                        duration: 0.032, direction: input.angle > 0 ? 1 : -1,
+                        hasEvidence: input.hasGeometryEvidence, window: config.ambiguityDuration)
+
+        case .developingTilt:
+            return make(input.developingTurnChecks + input.tiltSpacingChecks,
+                        duration: 0.024, direction: input.turnDirection,
                         hasEvidence: input.hasGeometryEvidence, window: config.ambiguityDuration)
 
         case .coordinatedSwipe:

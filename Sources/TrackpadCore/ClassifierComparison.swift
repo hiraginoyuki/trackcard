@@ -20,7 +20,8 @@ public struct ClassifierVariant: Sendable {
         variants.append(ClassifierVariant(id: "relative-motion", title: "Relative motion · 24 ms", configuration: .init(usesEarlyIntent: false, usesIndependentClassifiers: false)))
         variants.append(ClassifierVariant(id: "position-paths", title: "Position paths · 24 ms", configuration: .init(tiltModel: .paths, usesEarlyIntent: false, usesIndependentClassifiers: false)))
         variants.append(ClassifierVariant(id: "early-intent", title: "Early Swipe + press cue", configuration: .init(usesIndependentClassifiers: false)))
-        variants.append(ClassifierVariant(id: "independent", title: "Independent classifiers", configuration: .init()))
+        variants.append(ClassifierVariant(id: "independent", title: "Independent classifiers", configuration: .init(usesMotionBoundary: false)))
+        variants.append(ClassifierVariant(id: "motion-boundary", title: "Competing radial motion", configuration: .init()))
         return variants
     }()
 }

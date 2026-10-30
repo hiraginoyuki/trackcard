@@ -4,13 +4,13 @@ import Foundation
 /// none needs another path's confidence to reach its own threshold.
 public enum GestureClassifier: String, CaseIterable, Sendable {
     case decisiveRadialPinch, radialPinch, spacingPinch, geometryPinch
-    case decisiveTangentialTilt, tangentialTilt, geometryTilt
+    case decisiveTangentialTilt, tangentialTilt, geometryTilt, developingTilt
     case coordinatedSwipe, translationSwipe
 
     public var intent: ContactTransform.Intent {
         switch self {
         case .decisiveRadialPinch, .radialPinch, .spacingPinch, .geometryPinch: .pinch
-        case .decisiveTangentialTilt, .tangentialTilt, .geometryTilt: .rotation
+        case .decisiveTangentialTilt, .tangentialTilt, .geometryTilt, .developingTilt: .rotation
         case .coordinatedSwipe, .translationSwipe: .movement
         }
     }
@@ -24,6 +24,7 @@ public enum GestureClassifier: String, CaseIterable, Sendable {
         case .geometryPinch: "Pinch geometry"
         case .tangentialTilt: "Tangential motion"
         case .geometryTilt: "Tilt geometry"
+        case .developingTilt: "Developing turn"
         case .coordinatedSwipe: "Coordinated motion"
         case .translationSwipe: "Shared travel"
         }
@@ -37,6 +38,7 @@ public enum GestureClassifier: String, CaseIterable, Sendable {
         case .spacingPinch: "spacing"
         case .geometryPinch, .geometryTilt: "geometry"
         case .tangentialTilt: "tangent"
+        case .developingTilt: "developing"
         case .coordinatedSwipe: "coordinated"
         case .translationSwipe: "travel"
         }
@@ -54,8 +56,13 @@ public enum GestureClassifier: String, CaseIterable, Sendable {
         case .tangentialTilt: 5
         case .spacingPinch: 6
         case .geometryTilt: 7
-        case .geometryPinch: 8
+        case .developingTilt: 8
+        case .geometryPinch: 9
         }
+    }
+
+    static func configured(for configuration: ContactTransform.Configuration) -> [Self] {
+        allCases.filter { configuration.usesMotionBoundary || $0 != .developingTilt }
     }
 
     public struct Assessment: Sendable {

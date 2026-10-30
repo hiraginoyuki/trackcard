@@ -148,14 +148,14 @@ private func independentPair(span: Double = 40, degrees: Double = 0,
 }
 
 @Test func pinchFallbackCannotRaceAnAmbiguousTurnUsingOlderSpacingEvidence() {
-    var transform = ContactTransform()
+    var transform = ContactTransform(configuration: .init(usesRelativeMotion: false))
     _ = transform.receive(independentPair(), canBegin: true, at: 0)
     _ = transform.receive(independentPair(span: 44, degrees: 1.5), canBegin: true, at: 0.01)
     for time in [0.05, 0.08] {
-        _ = transform.receive(independentPair(span: 44, degrees: 3), canBegin: true, at: time)
+        _ = transform.receive(independentPair(span: 44, degrees: 5), canBegin: true, at: time)
         #expect(transform.intent == .undecided)
     }
-    _ = transform.receive(independentPair(span: 44, degrees: 3), canBegin: true, at: 0.11)
+    _ = transform.receive(independentPair(span: 44, degrees: 5), canBegin: true, at: 0.11)
     #expect(transform.intent == .rotation && transform.committedClassifier == .geometryTilt)
 }
 
@@ -179,7 +179,7 @@ private func independentPair(span: Double = 40, degrees: Double = 0,
     let current = comparison.traces.first { $0.variant.isCurrent }!
     #expect(current.decision == .movement && current.committedClassifier == .coordinatedSwipe)
     #expect(current.samples.last?.classifiers.count == GestureClassifier.allCases.count)
-    #expect(comparison.traces.filter { !$0.variant.isCurrent }.allSatisfy { $0.samples.last?.classifiers.isEmpty == true })
+    #expect(comparison.traces.filter { !$0.variant.configuration.usesIndependentClassifiers }.allSatisfy { $0.samples.last?.classifiers.isEmpty == true })
     comparison.receiveRightClick(at: 0.01)
     #expect(comparison.traces.first { $0.variant.isCurrent }?.committedClassifier == .coordinatedSwipe)
 }
@@ -211,7 +211,7 @@ private func independentPair(span: Double = 40, degrees: Double = 0,
     _ = transform.receive(independentPair(), canBegin: true, at: 0.016)
     _ = transform.receive(independentPair(degrees: 3), canBegin: true, at: 0.024)
     let tilt = transform.assessment.classifiers.filter { $0.classifier.intent == .rotation }
-    #expect(tilt.count == 3 && tilt.allSatisfy { $0.prior == 0.05 && !$0.isReady })
+    #expect(tilt.count == 4 && tilt.allSatisfy { $0.prior == 0.05 && !$0.isReady })
     #expect(tilt.allSatisfy { $0.blockers.contains { $0.contains("after prior") } })
 }
 

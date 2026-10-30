@@ -27,20 +27,23 @@ public struct ContactTransformUpdate: Sendable {
 
 /// Uses physical contact geometry, independently of synthesized AppKit gestures.
 public struct ContactTransform: Sendable {
-    public static let version = "independent-classifiers-v5"
+    public static let version = "motion-boundary-v6"
     public struct Configuration: Sendable, Equatable {
         public enum TiltModel: Sendable { case geometry, vectors, vectorsAndAxis, paths }
         public let tiltModel: TiltModel
         public let usesRelativeMotion: Bool
         public let usesEarlyIntent: Bool
         public let usesIndependentClassifiers: Bool
+        /// Apply the radial-travel guard and developing-turn recovery to the
+        /// independent classifiers. Historical comparison rules ignore it.
+        public let usesMotionBoundary: Bool
         public let earlyPinchRatio: Double?
         public let earlyPinchDuration: TimeInterval
         public let ambiguityDuration: TimeInterval
         public init(earlyPinchRatio: Double? = 0.06, earlyPinchDuration: TimeInterval = 0.032,
                     ambiguityDuration: TimeInterval = 0.096, tiltModel: TiltModel = .geometry,
                     usesRelativeMotion: Bool = true, usesEarlyIntent: Bool = true,
-                    usesIndependentClassifiers: Bool = true) {
+                    usesIndependentClassifiers: Bool = true, usesMotionBoundary: Bool = true) {
             self.earlyPinchRatio = earlyPinchRatio
             self.earlyPinchDuration = earlyPinchDuration
             self.ambiguityDuration = ambiguityDuration
@@ -48,6 +51,7 @@ public struct ContactTransform: Sendable {
             self.usesRelativeMotion = usesRelativeMotion
             self.usesEarlyIntent = usesEarlyIntent
             self.usesIndependentClassifiers = usesIndependentClassifiers
+            self.usesMotionBoundary = usesMotionBoundary
         }
     }
     public let configuration: Configuration
@@ -76,6 +80,7 @@ public struct ContactTransform: Sendable {
     }
     private var lastArrival: TimeInterval?
     private var velocityTilt = VelocityTiltEvidence()
+    private var peakRadialSpeed: Double = 0
     private var lastSource: TimeInterval?
     private var physicalTime: TimeInterval = 0
     private var lastSampleAngle: Double = 0
@@ -215,10 +220,11 @@ public struct ContactTransform: Sendable {
         let travel = displacements.map { hypot($0.x, $0.y) }
         let netAlignment = (displacements[0].x * displacements[1].x + displacements[0].y * displacements[1].y) /
             max(0.000001, travel[0] * travel[1])
+        peakRadialSpeed = max(peakRadialSpeed, abs(features?.radialVelocity ?? 0))
         let measurements = GestureMeasurements(configuration: configuration, initialDistance: initialDistance,
             distance: distance, angle: angleFromStart, translation: translation, pinchMotion: pinchMotion,
             rotationMotion: rotationMotion, minimumContactTravel: min(travel[0], travel[1]),
-            netAlignment: netAlignment, features: features, tiltPrior: tiltPrior)
+            netAlignment: netAlignment, features: features, tiltPrior: tiltPrior, peakRadialSpeed: peakRadialSpeed)
         var pressScore = 0.0
         if configuration.usesEarlyIntent, physicalTime >= 0.008 - 1e-9,
            let first = ordered[0].force, let second = ordered[1].force,
@@ -244,7 +250,7 @@ public struct ContactTransform: Sendable {
         pressPreviewActive = pressScore >= 1
         let decision: Intent?
         if configuration.usesIndependentClassifiers {
-            let classifiers = classifierBank.receive(GestureClassifier.allCases.map { $0.signal(for: measurements) }, at: physicalTime)
+            let classifiers = classifierBank.receive(GestureClassifier.configured(for: configuration).map { $0.signal(for: measurements) }, at: physicalTime)
             assessment = GestureClassifierBank.assessment(classifiers, measurements: measurements, pressScore: pressScore)
             let winner = GestureClassifierBank.winner(in: classifiers)
             decision = mode == nil && !moving ? winner?.intent : nil
