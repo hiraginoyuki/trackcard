@@ -53,6 +53,20 @@ private func pathPair(span: Double = 40, turn: Double = 0, axis: Double = 0,
     #expect(path.relativeCurvature == nil && path.rotationSupport == 0)
 }
 
+@Test func pathClassifierDoesNotDependOnJaggedEllipseAngles() {
+    var smooth = ContactTransform(configuration: .init(tiltModel: .paths))
+    var quantized = ContactTransform(configuration: .init(tiltModel: .paths))
+    for index in 0...20 {
+        let t = Double(index) * 0.01
+        let turn = t * 2
+        let plain = smooth.receive(pathPair(turn: turn), canBegin: true, at: t)
+        let jagged = quantized.receive(pathPair(turn: turn, axis: Double(index % 8) * .pi / 8), canBegin: true, at: t)
+        #expect(plain?.kind == jagged?.kind && plain?.phase == jagged?.phase)
+        #expect(smooth.assessment.confidence == quantized.assessment.confidence)
+        #expect(smooth.assessment.tiltFeatures?.path?.relativeCurvature == quantized.assessment.tiltFeatures?.path?.relativeCurvature)
+    }
+    #expect(smooth.intent == .rotation && quantized.intent == .rotation)
+}
 
 @Test func curvatureIsInvariantToTrackpadPositionAndDropsHistoryAfterAGap() throws {
     var local = PositionPathEvidence(), shifted = PositionPathEvidence()
