@@ -79,6 +79,7 @@ public struct GestureAttempt: Codable, Identifiable, Sendable {
     public var droppedFrames: UInt64 = 0
     public var intervals: [GestureInterval] = []
     public var contactIndex: GestureContactIndex?
+    public var radialTrial: RadialTrialRecord?
 }
 
 /// Each source owns its own intervals. Native events, contacts from both
@@ -133,6 +134,8 @@ public struct GestureRecordingSession: Sendable {
     public mutating func updateDevices(_ devices: [RecordedDevice]) {
         for device in devices where !attempt.devices.contains(where: { $0.id == device.id }) { attempt.devices.append(device) }
     }
+
+    public mutating func updateRadialTrial(_ trial: RadialTrialRecord) { attempt.radialTrial = trial }
 
     public mutating func tick(at time: TimeInterval, droppedFrames: UInt64 = 0) {
         guard time.isFinite else { return }
