@@ -40,6 +40,10 @@ controls:
 During a size or opacity adjustment, the current value appears at the pointer
 and haptic ticks mark percentage steps.
 
+At minimum size, motion that turns while pinching inward gets a slight
+preference for an available opacity adjustment. An outward pinch enlarges the
+preview as usual.
+
 Drag the preview past the left or right edge to tuck it away. Click the
 remaining tab or swipe inward over it to bring the preview back. You can also
 choose **Bring Back Preview** from the menu.
@@ -122,8 +126,16 @@ labels and review marks are stored separately from the original sensor logs.
 ## Development
 
 Use `swift run Trackcard` for a development run and `swift test` to run
-the tests. `swift run Trackcard --demo` shows two simulated trackpads for
-checking card swaps and layout.
+the core tests. Run `./scripts/test-bridge.sh` to check capture buffering and
+concurrent delivery without hardware. `swift run Trackcard --demo` shows two
+simulated trackpads for checking card swaps and layout.
+
+For delivery diagnostics, set `TRACKCARD_DELIVERY_TRACE` to a local JSONL file
+when launching the executable. It records callback, recognition, and visual
+submission timestamps, plus target and displayed scale and opacity. Visual
+submission marks a compositor flush; measuring screen response requires a
+separate observation. Trace writes can affect timing, so leave tracing off
+when assessing ordinary use.
 
 Planned work lives in [ROADMAP.md](ROADMAP.md).
 
