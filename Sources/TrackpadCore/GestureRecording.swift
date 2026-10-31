@@ -37,11 +37,16 @@ public struct RecordedContactFrame: Codable, Sendable {
     public var sourceFrame: UInt64
     public var contacts: [RecordedContact]
     public var pointerOverPreview: Bool?
+    public var actionAvailability: GestureActionAvailability?
+    /// Host receipt before waiting on the bridge lock, relative to recording start.
+    public var callbackTime: TimeInterval?
     public init(deviceID: UInt64, sequence: UInt64, time: TimeInterval, sourceTimestamp: TimeInterval = 0,
-                sourceFrame: UInt64 = 0, contacts: [RecordedContact], pointerOverPreview: Bool? = nil) {
+                sourceFrame: UInt64 = 0, contacts: [RecordedContact], pointerOverPreview: Bool? = nil,
+                actionAvailability: GestureActionAvailability? = nil) {
         self.deviceID = deviceID; self.sequence = sequence; self.time = time
         self.sourceTimestamp = sourceTimestamp; self.sourceFrame = sourceFrame; self.contacts = contacts
         self.pointerOverPreview = pointerOverPreview
+        self.actionAvailability = actionAvailability
     }
 }
 
@@ -70,6 +75,8 @@ public struct GestureInterval: Codable, Identifiable, Sendable {
 public struct GestureAttempt: Codable, Identifiable, Sendable {
     public var schemaVersion = 1
     public var recognizerVersion: String? = ContactTransform.version
+    public var deliveryVersion: String? = RecognitionDelivery.version
+    public var tiltThresholdsByDevice: [String: TiltThresholds]?
     public var id = UUID()
     public var label: GestureLabel
     public var startedAt = Date()
@@ -91,8 +98,10 @@ public struct GestureRecordingSession: Sendable {
     private var transforms: [UInt64: ContactTransform] = [:]
     private var contacts = GestureContactTracker()
 
-    public init(label: GestureLabel, devices: [RecordedDevice], at time: TimeInterval) {
+    public init(label: GestureLabel, devices: [RecordedDevice], at time: TimeInterval,
+                tiltThresholdsByDevice: [String: TiltThresholds] = [:]) {
         attempt = GestureAttempt(label: label, devices: devices)
+        attempt.tiltThresholdsByDevice = tiltThresholdsByDevice.isEmpty ? nil : tiltThresholdsByDevice
         attempt.contactIndex = contacts.index
         startedUptime = time
     }
@@ -107,12 +116,14 @@ public struct GestureRecordingSession: Sendable {
         observe(key: "contacts.\(frame.deviceID)", kind: "Contacts", deviceID: frame.deviceID,
                 time: frame.time, ending: touching.isEmpty)
         guard let device = attempt.devices.first(where: { $0.id == frame.deviceID }) else { return }
-        var transform = transforms[frame.deviceID] ?? ContactTransform()
+        var transform = transforms[frame.deviceID] ?? ContactTransform(configuration: .init(
+            tiltThresholds: attempt.tiltThresholdsByDevice?[String(frame.deviceID)] ?? .standard))
         let previousIntent = transform.intent
         let update = transform.receive(touching.map {
             TransformContact(id: $0.id, positionMM: CGPoint(x: $0.position.x * device.sizeMM.width,
                                                           y: $0.position.y * device.sizeMM.height), orientation: Double($0.angle), radiiMM: $0.radiiMM, force: Double($0.force))
-        }, canBegin: true, at: frame.time, sourceTimestamp: frame.sourceTimestamp, pointerOverTarget: frame.pointerOverPreview)
+        }, canBegin: true, at: frame.time, sourceTimestamp: frame.sourceTimestamp, pointerOverTarget: frame.pointerOverPreview,
+           actionAvailability: frame.actionAvailability)
         transforms[frame.deviceID] = transform
         if transform.intent == .movement || previousIntent == .movement {
             observe(key: "recognized.\(frame.deviceID)", kind: "Recognized Swipe", deviceID: frame.deviceID,

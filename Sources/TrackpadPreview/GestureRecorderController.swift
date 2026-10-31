@@ -130,6 +130,7 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
     var onReplayEnded: (() -> Void)?
     var capturePreview: (() -> RecordedPreviewState)?
     var pointerOverPreview: (() -> Bool)?
+    var actionAvailability: (() -> GestureActionAvailability?)?
     var onReplayPreview: ((RecordedPreviewState) -> Void)?
     var isRecording: Bool { session != nil }
     var isReplaying: Bool { replayRequest != nil }
@@ -146,6 +147,7 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
     private let comparisonButton = NSButton(title: "Compare Classifiers", target: nil, action: nil)
     private var classifierComparison: ClassifierComparisonController?
     private var lastRightClick: TimeInterval = -.infinity
+    var onNativeRightClick: ((UInt64?, TimeInterval) -> Void)?
     private let radialView = RadialExperimentView()
     private var contentStack: NSStackView?
     private var radialVisible = false
@@ -739,8 +741,8 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
     @objc func showClassifierComparison() {
         if classifierComparison == nil {
             classifierComparison = ClassifierComparisonController()
-            classifierComparison?.onRightClick = { [weak self] deviceID in
-                self?.receiveRightClick(deviceID: deviceID, at: ProcessInfo.processInfo.systemUptime)
+            classifierComparison?.onRightClick = { [weak self] deviceID, time in
+                self?.receiveRightClick(deviceID: deviceID, at: time)
             }
             classifierComparison?.setDevices(devices)
             classifierComparison?.pointerOverPreview = pointerOverPreview
@@ -979,7 +981,8 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
     @discardableResult
     private func beginRecording(label: GestureLabel, radialTrial: RadialTrialRecord? = nil, at time: TimeInterval? = nil) -> Bool {
         guard !isRecording, !isReplaying, !devices.isEmpty else { return false }
-        var session = GestureRecordingSession(label: label, devices: devices, at: time ?? ProcessInfo.processInfo.systemUptime)
+        var session = GestureRecordingSession(label: label, devices: devices, at: time ?? ProcessInfo.processInfo.systemUptime,
+            tiltThresholdsByDevice: ClassifierTuningStore.shared.snapshot(for: devices))
         if let radialTrial { session.updateRadialTrial(radialTrial) }
         do {
             writer = try GestureRecordingWriter(directory: directory, attempt: session.attempt)
@@ -1050,7 +1053,6 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
     }
 
     func receive(_ frame: ContactFrame, deviceID: UInt64, dropped: UInt64) {
-        observeContacts(frame, deviceID: deviceID)
         guard let started = session?.startedUptime else { return }
         self.dropped = max(self.dropped, dropped)
         let contacts = frame.contacts.map { contact in
@@ -1060,9 +1062,10 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
             sample.tilt = contact.tilt; sample.density = contact.density; sample.classification = contact.classification
             return sample
         }
-        let sample = RecordedContactFrame(deviceID: deviceID, sequence: frame.sequence, time: frame.receivedAt - started,
+        var sample = RecordedContactFrame(deviceID: deviceID, sequence: frame.sequence, time: frame.receivedAt - started,
                                           sourceTimestamp: frame.sourceTimestamp, sourceFrame: frame.sourceFrame, contacts: contacts,
-                                          pointerOverPreview: pointerOverPreview?())
+                                          pointerOverPreview: pointerOverPreview?(), actionAvailability: actionAvailability?())
+        if frame.callbackAt > 0 { sample.callbackTime = frame.callbackAt - started }
         guard sample.time >= 0 else { return }
         session?.receive(sample)
         writer?.append(RecordingLogEntry(kind: "contacts", frame: sample))
@@ -1072,18 +1075,23 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
         }
     }
 
-    // Live preview frames keep the release gate working after the recording
-    // queue is disabled. A different device or an older queued frame cannot
-    // release the pair that performed this trial.
-    func observeContacts(_ frame: ContactFrame, deviceID: UInt64) {
+    // The independent recognition stream feeds live consumers exactly once.
+    // Recording start/stop and its raw-data drain cannot reorder comparison input.
+    func observeContacts(_ frame: ContactFrame, deviceID: UInt64, recognize: Bool = true, at time: TimeInterval? = nil) {
         guard frame.receivedAt.isFinite,
               frame.receivedAt >= (radialContacts[deviceID]?.time ?? -.infinity) else { return }
         let count = frame.contacts.filter(\.isTouching).count
         radialContacts[deviceID] = (frame.receivedAt, count, frame)
-        if !isReplaying { classifierComparison?.receive(frame, deviceID: deviceID) }
+        if !isReplaying && recognize {
+            classifierComparison?.receive(frame, deviceID: deviceID, at: time, actionAvailability: actionAvailability?())
+        }
         let wasAwaitingRelease = radialContinuation?.awaitingRelease
         radialContinuation?.receive(deviceID: deviceID, time: frame.receivedAt, count: count)
         if radialContinuation?.awaitingRelease != wasAwaitingRelease { updateControls() }
+    }
+
+    func interruptRecognition(deviceID: UInt64) {
+        classifierComparison?.interruptRecognition(deviceID: deviceID)
     }
 
     func observeCursor(_ position: CGPoint, at time: TimeInterval) {
@@ -1123,7 +1131,7 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
 
     private func receive(_ event: NSEvent) -> Bool {
         if event.type == .rightMouseDown || event.type == .rightMouseUp {
-            let time = ProcessInfo.processInfo.systemUptime
+            let time = event.timestamp
             let deviceID = radialContacts.filter { $0.value.count == 2 && time - $0.value.time < 0.15 }.max { $0.value.time < $1.value.time }?.key
             receiveRightClick(deviceID: deviceID, at: time, ending: event.type == .rightMouseUp)
             return false
@@ -1154,6 +1162,7 @@ final class GestureRecorderController: NSObject, NSWindowDelegate, NSOutlineView
         if !ending {
             guard time - lastRightClick > 0.05 else { return }
             lastRightClick = time
+            onNativeRightClick?(deviceID, time)
         }
         if !ending { classifierComparison?.receiveRightClick(deviceID: deviceID, at: time) }
         guard let started = session?.startedUptime else { return }

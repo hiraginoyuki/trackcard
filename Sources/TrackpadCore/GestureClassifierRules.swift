@@ -58,6 +58,19 @@ struct GestureMeasurements: Sendable {
     let features: VelocityTiltFeatures?
     let tiltPrior: Double
     let peakRadialSpeed: Double
+    var actionAvailability: GestureActionAvailability? = nil
+
+    /// At minimum size, a small extra preference is useful only while the
+    /// competing inward resize is blocked and this signed turn can change
+    /// opacity. Keep decisive paths and the held-pointer prior independent.
+    var minimumScaleTiltAllowance: Double {
+        guard let context = actionAvailability, !context.canShrink, logSpacing < 0,
+              tiltPrior == 1, let features, pinchMotion >= 0.5,
+              features.radialVelocity < 0, features.angularVelocity * angle > 0,
+              rotationMotion > pinchMotion / 2.5 else { return 0 }
+        let usefulOpacity = angle > 0 ? context.canDecreaseOpacity : context.canIncreaseOpacity
+        return usefulOpacity ? 0.015 : 0
+    }
 
     var logSpacing: Double { log(distance / initialDistance) }
     var rotationStrength: Double { abs(angle) / (Self.geometryTiltDegrees * .pi / 180) * tiltPrior }
@@ -85,7 +98,7 @@ struct GestureMeasurements: Sendable {
         // Incidental angle change can be large during a pinch. Compare travel
         // in millimeters instead of treating degrees as an independent win.
         if configuration.usesMotionBoundary {
-            checks.append(.minimum("Angular versus radial travel", rotationMotion, pinchMotion * 0.7, "mm"))
+            checks.append(.minimum("Angular versus radial travel", rotationMotion, pinchMotion * configuration.tiltThresholds.angularToRadialRatio, "mm"))
         }
         return checks
     }
@@ -102,8 +115,28 @@ struct GestureMeasurements: Sendable {
             .gate("Angular velocity agrees with turn direction", (features?.angularVelocity ?? 0) * angle > 0)
         ]
     }
+    var relativeTurnChecks: [GestureClassifierCheck] {
+        let radial = features?.radialVelocity ?? 0
+        let tangential = features?.tangentialVelocity ?? 0
+        let relativeSpeed = hypot(radial, tangential)
+        // Common translation can align the two finger velocities even while
+        // their relative vector turns. Measure that turn directly; retain a
+        // speed floor and enough differential motion to reject incidental
+        // rotation during a swipe. Ellipse orientation has no role here.
+        return [
+            .gate("Relative-turn classifier enabled", configuration.usesMotionBoundary && configuration.usesRelativeTurn && usesTangentialMotion),
+            .minimum("Turn angle after prior", abs(angle) * 180 / .pi * tiltPrior, 2, "°"),
+            .minimum("Angular travel", rotationMotion, 0.75, "mm"),
+            .minimum("Tangential speed", abs(tangential), 12, "mm/s"),
+            .minimum("Tangential fraction after prior", abs(tangential) / max(0.001, relativeSpeed) * tiltPrior, 0.75),
+            .minimum("Relative versus shared speed", relativeSpeed, features?.commonSpeed ?? 0, "mm/s"),
+            .minimum("Angular versus radial travel", rotationMotion, pinchMotion * configuration.tiltThresholds.angularToRadialRatio, "mm"),
+            .gate("Angular velocity agrees with turn direction", (features?.angularVelocity ?? 0) * angle > 0)
+        ]
+    }
     var geometryTiltPossible: Bool { tiltGeometryChecks.allSatisfy(\.passed) }
     var developingTurnPossible: Bool { developingTurnChecks.allSatisfy(\.passed) }
+    var relativeTurnPossible: Bool { relativeTurnChecks.allSatisfy(\.passed) }
     var geometryPinchPossible: Bool { pinchGeometryChecks.allSatisfy(\.passed) }
     var tiltSpacingChecks: [GestureClassifierCheck] {
         geometryPinchPossible ? [.minimum("Turn versus spacing strength", rotationStrength, pinchStrength * 0.9)] : []
@@ -155,8 +188,12 @@ extension GestureClassifier {
             // A spacing-led start can develop into a turn. This local geometry
             // condition retains that ambiguity protection without depending on
             // the readiness or confidence of any Tilt classifier.
-            if input.geometryTiltPossible || input.developingTurnPossible {
-                let name = input.geometryTiltPossible ? "Turn ambiguity" : "Developing turn ambiguity"
+            let ambiguity: String?
+            if input.geometryTiltPossible { ambiguity = "Turn ambiguity" }
+            else if input.developingTurnPossible { ambiguity = "Developing turn ambiguity" }
+            else if input.relativeTurnPossible { ambiguity = "Relative turn ambiguity" }
+            else { ambiguity = nil }
+            if let name = ambiguity {
                 checks.append(Check(name: name, value: input.rotationStrength, comparison: .below,
                                     threshold: input.pinchStrength * 0.9, unit: ""))
             }
@@ -167,7 +204,8 @@ extension GestureClassifier {
             let decisive = self == .decisiveTangentialTilt
             var checks: [Check] = [
                 .gate("Tangential-motion classifier enabled", input.usesTangentialMotion),
-                .minimum("Tangential coordination after prior", (features?.confidence ?? 0) * input.tiltPrior, decisive ? 0.95 : 0.7),
+                .minimum("Tangential coordination after prior", (features?.confidence ?? 0) * input.tiltPrior,
+                         decisive ? 0.95 : max(0.3, config.tiltThresholds.tangentialConfidence - input.minimumScaleTiltAllowance)),
                 .minimum("Turn angle", abs(input.angle) * radiansToDegrees, decisive ? 2 : 1, "°"),
                 .minimum("Angular travel", input.rotationMotion, decisive ? 1 : 0.5, "mm")
             ]
@@ -181,7 +219,7 @@ extension GestureClassifier {
             if config.tiltModel == .paths {
                 checks.append(.minimum("Position-path support", features?.path?.rotationSupport ?? 0, 0.5))
             }
-            return make(checks, duration: decisive ? 0.008 : 0.024, direction: input.turnDirection)
+            return make(checks, duration: decisive ? 0.008 : config.tiltThresholds.persistence, direction: input.turnDirection)
 
         case .geometryTilt:
             return make(input.tiltGeometryChecks + input.tiltSpacingChecks,
@@ -192,6 +230,9 @@ extension GestureClassifier {
             return make(input.developingTurnChecks + input.tiltSpacingChecks,
                         duration: 0.024, direction: input.turnDirection,
                         hasEvidence: input.hasGeometryEvidence, window: config.ambiguityDuration)
+
+        case .relativeTilt:
+            return make(input.relativeTurnChecks, duration: 0.016, direction: input.turnDirection)
 
         case .coordinatedSwipe:
             return make([
@@ -206,11 +247,20 @@ extension GestureClassifier {
             ])
 
         case .translationSwipe:
-            return make([
+            var checks: [Check] = [
                 .minimum("Shared travel", input.translation, 3, "mm"),
                 Check(name: "Relative versus shared travel", value: max(input.pinchMotion, input.rotationMotion) * 1.5,
                       comparison: .below, threshold: input.translation, unit: "mm")
-            ])
+            ]
+            // The slow fallback has no velocity-coordination requirement.
+            // During a measured relative turn, require the same 3× travel
+            // dominance as the coordinated path. This uses physical inputs,
+            // independently of another classifier's score or timer.
+            if input.relativeTurnPossible {
+                checks.append(.minimum("Shared versus angular travel during turn", input.translation,
+                                       input.rotationMotion * 3, "mm"))
+            }
+            return make(checks)
         }
     }
 }

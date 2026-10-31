@@ -4,24 +4,37 @@ public struct ClassifierVariant: Sendable {
     public let id: String
     public let title: String
     public let configuration: ContactTransform.Configuration
-    public var isCurrent: Bool { configuration == ContactTransform.Configuration() }
+    private let current: Bool?
+    public var isCurrent: Bool { current ?? (configuration == ContactTransform.Configuration()) }
+
+    public init(id: String, title: String, configuration: ContactTransform.Configuration, isCurrent: Bool? = nil) {
+        self.id = id; self.title = title; self.configuration = configuration; self.current = isCurrent
+    }
+
+    public static func withTuning(_ thresholds: TiltThresholds) -> [Self] {
+        guard thresholds != .standard else { return comparisons }
+        return comparisons.map { Self(id: $0.id, title: $0.title, configuration: $0.configuration, isCurrent: false) }
+            + [Self(id: "device-tilt-tuning", title: "Tuned Tilt", configuration: .init(tiltThresholds: thresholds), isCurrent: true)]
+    }
 
     public static let comparisons: [ClassifierVariant] = {
-        var variants = [ClassifierVariant(id: "baseline", title: "Baseline · 96 ms", configuration: .init(earlyPinchRatio: nil, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false))]
+        var variants = [ClassifierVariant(id: "baseline", title: "Baseline · 96 ms", configuration: .init(earlyPinchRatio: nil, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false, timingPolicy: .legacyRelative))]
         for ratio in [0.04, 0.06, 0.08] {
             for duration in [0.016, 0.032] {
                 variants.append(ClassifierVariant(id: "\(Int(ratio * 100))-\(Int(duration * 1000))",
                     title: "\(Int(ratio * 100))% spacing · \(Int(duration * 1000)) ms",
-                    configuration: .init(earlyPinchRatio: ratio, earlyPinchDuration: duration, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false)))
+                    configuration: .init(earlyPinchRatio: ratio, earlyPinchDuration: duration, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false, timingPolicy: .legacyRelative)))
             }
         }
-        variants.append(ClassifierVariant(id: "vectors", title: "Velocity vectors · 24 ms", configuration: .init(tiltModel: .vectors, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false)))
-        variants.append(ClassifierVariant(id: "vectors-axis", title: "Vectors + thumb axis · 24 ms", configuration: .init(tiltModel: .vectorsAndAxis, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false)))
-        variants.append(ClassifierVariant(id: "relative-motion", title: "Relative motion · 24 ms", configuration: .init(usesEarlyIntent: false, usesIndependentClassifiers: false)))
-        variants.append(ClassifierVariant(id: "position-paths", title: "Position paths · 24 ms", configuration: .init(tiltModel: .paths, usesEarlyIntent: false, usesIndependentClassifiers: false)))
-        variants.append(ClassifierVariant(id: "early-intent", title: "Early Swipe + press cue", configuration: .init(usesIndependentClassifiers: false)))
-        variants.append(ClassifierVariant(id: "independent", title: "Independent classifiers", configuration: .init(usesMotionBoundary: false)))
-        variants.append(ClassifierVariant(id: "motion-boundary", title: "Competing radial motion", configuration: .init()))
+        variants.append(ClassifierVariant(id: "vectors", title: "Velocity vectors · 24 ms", configuration: .init(tiltModel: .vectors, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "vectors-axis", title: "Vectors + thumb axis · 24 ms", configuration: .init(tiltModel: .vectorsAndAxis, usesRelativeMotion: false, usesEarlyIntent: false, usesIndependentClassifiers: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "relative-motion", title: "Relative motion · 24 ms", configuration: .init(usesEarlyIntent: false, usesIndependentClassifiers: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "position-paths", title: "Position paths · 24 ms", configuration: .init(tiltModel: .paths, usesEarlyIntent: false, usesIndependentClassifiers: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "early-intent", title: "Early Swipe + press cue", configuration: .init(usesIndependentClassifiers: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "independent", title: "Independent classifiers", configuration: .init(usesMotionBoundary: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "motion-boundary", title: "Competing radial motion", configuration: .init(usesRelativeTurn: false, timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "relative-turn", title: "Relative turn · 16 ms", configuration: .init(timingPolicy: .legacyRelative)))
+        variants.append(ClassifierVariant(id: "source-clock-timers", title: "Source-clock timers", configuration: .init()))
         return variants
     }()
 }
@@ -78,6 +91,14 @@ public struct ClassifierComparison: Sendable {
         self = ClassifierComparison(variants: traces.map(\.variant))
     }
 
+    public mutating func reconfigure(variants: [ClassifierVariant]) {
+        let waitForRelease = isCollecting || awaitingRelease
+        let nextRevision = revision &+ 1
+        self = ClassifierComparison(variants: variants)
+        awaitingRelease = waitForRelease
+        revision = nextRevision
+    }
+
     public mutating func finish() {
         isCollecting = false; awaitingRelease = false; lastArrival = nil
         transforms = traces.map { ContactTransform(configuration: $0.variant.configuration) }
@@ -96,7 +117,7 @@ public struct ClassifierComparison: Sendable {
     }
 
     public mutating func receive(_ contacts: [TransformContact], at time: TimeInterval, sourceTimestamp: TimeInterval = 0,
-                                 pointerOverTarget: Bool? = nil) {
+                                 pointerOverTarget: Bool? = nil, actionAvailability: GestureActionAvailability? = nil) {
         guard time.isFinite, time >= 0, lastArrival.map({ time > $0 }) ?? true else { return }
         lastArrival = time
         guard contacts.count == 2, contacts[0].id != contacts[1].id,
@@ -106,7 +127,8 @@ public struct ClassifierComparison: Sendable {
             awaitingRelease = false
             for index in transforms.indices {
                 _ = transforms[index].receive(contacts, canBegin: true, at: time,
-                    sourceTimestamp: sourceTimestamp, pointerOverTarget: pointerOverTarget)
+                    sourceTimestamp: sourceTimestamp, pointerOverTarget: pointerOverTarget,
+                    actionAvailability: traces[index].variant.isCurrent ? actionAvailability : nil)
             }
             return
         }
@@ -117,7 +139,8 @@ public struct ClassifierComparison: Sendable {
         }
         for index in transforms.indices {
             _ = transforms[index].receive(contacts, canBegin: true, at: time, sourceTimestamp: sourceTimestamp,
-                                          pointerOverTarget: pointerOverTarget)
+                                          pointerOverTarget: pointerOverTarget,
+                                          actionAvailability: traces[index].variant.isCurrent ? actionAvailability : nil)
             let transform = transforms[index]
             if traces[index].decisionTime == nil, transform.intent != .undecided {
                 traces[index].decision = transform.intent

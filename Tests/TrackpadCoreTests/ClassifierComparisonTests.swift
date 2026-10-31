@@ -9,12 +9,15 @@ private func comparisonPair(_ distance: Double = 40, angle: Double = 0) -> [Tran
 
 @Test func comparisonVariantsContainOneCurrentAndTheFullThresholdTimingCross() {
     let variants = ClassifierVariant.comparisons
-    #expect(variants.count == 14 && variants.filter(\.isCurrent).count == 1)
-    #expect(variants.first { $0.isCurrent }?.id == "motion-boundary")
-    #expect(variants.filter { !["relative-motion", "position-paths", "early-intent", "independent", "motion-boundary"].contains($0.id) }.allSatisfy { !$0.configuration.usesRelativeMotion })
-    #expect(variants.filter { !["early-intent", "independent", "motion-boundary"].contains($0.id) }.allSatisfy { !$0.configuration.usesEarlyIntent })
-    #expect(variants.filter { !["independent", "motion-boundary"].contains($0.id) }.allSatisfy { !$0.configuration.usesIndependentClassifiers })
+    #expect(variants.count == 16 && variants.filter(\.isCurrent).count == 1)
+    #expect(variants.first { $0.isCurrent }?.id == "source-clock-timers")
+    #expect(variants.filter { !$0.isCurrent }.allSatisfy { $0.configuration.timingPolicy == .legacyRelative })
+    #expect(variants.first { $0.isCurrent }?.configuration.timingPolicy == .sourceClock)
+    #expect(variants.filter { !["relative-motion", "position-paths", "early-intent", "independent", "motion-boundary", "relative-turn", "source-clock-timers"].contains($0.id) }.allSatisfy { !$0.configuration.usesRelativeMotion })
+    #expect(variants.filter { !["early-intent", "independent", "motion-boundary", "relative-turn", "source-clock-timers"].contains($0.id) }.allSatisfy { !$0.configuration.usesEarlyIntent })
+    #expect(variants.filter { !["independent", "motion-boundary", "relative-turn", "source-clock-timers"].contains($0.id) }.allSatisfy { !$0.configuration.usesIndependentClassifiers })
     #expect(variants.first { $0.id == "independent" }?.configuration.usesMotionBoundary == false)
+    #expect(variants.first { $0.id == "motion-boundary" }?.configuration.usesRelativeTurn == false)
     #expect(Set(variants.map(\.id)).count == variants.count)
     #expect(variants.first?.configuration.earlyPinchRatio == nil)
     for ratio in [0.04, 0.06, 0.08] {

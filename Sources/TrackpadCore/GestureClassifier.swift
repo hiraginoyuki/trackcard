@@ -4,13 +4,13 @@ import Foundation
 /// none needs another path's confidence to reach its own threshold.
 public enum GestureClassifier: String, CaseIterable, Sendable {
     case decisiveRadialPinch, radialPinch, spacingPinch, geometryPinch
-    case decisiveTangentialTilt, tangentialTilt, geometryTilt, developingTilt
+    case decisiveTangentialTilt, tangentialTilt, geometryTilt, developingTilt, relativeTilt
     case coordinatedSwipe, translationSwipe
 
     public var intent: ContactTransform.Intent {
         switch self {
         case .decisiveRadialPinch, .radialPinch, .spacingPinch, .geometryPinch: .pinch
-        case .decisiveTangentialTilt, .tangentialTilt, .geometryTilt, .developingTilt: .rotation
+        case .decisiveTangentialTilt, .tangentialTilt, .geometryTilt, .developingTilt, .relativeTilt: .rotation
         case .coordinatedSwipe, .translationSwipe: .movement
         }
     }
@@ -25,6 +25,7 @@ public enum GestureClassifier: String, CaseIterable, Sendable {
         case .tangentialTilt: "Tangential motion"
         case .geometryTilt: "Tilt geometry"
         case .developingTilt: "Developing turn"
+        case .relativeTilt: "Relative turn"
         case .coordinatedSwipe: "Coordinated motion"
         case .translationSwipe: "Shared travel"
         }
@@ -39,13 +40,14 @@ public enum GestureClassifier: String, CaseIterable, Sendable {
         case .geometryPinch, .geometryTilt: "geometry"
         case .tangentialTilt: "tangent"
         case .developingTilt: "developing"
+        case .relativeTilt: "relative turn"
         case .coordinatedSwipe: "coordinated"
         case .translationSwipe: "travel"
         }
     }
 
-    // Resolve simultaneous crossings deterministically. Shared movement keeps
-    // its ownership priority; specific motion paths precede geometry fallbacks.
+    // Resolve simultaneous crossings deterministically. Preserve established
+    // ownership; the relative-turn path fills gaps in the existing classifiers.
     fileprivate var priority: Int {
         switch self {
         case .coordinatedSwipe: 0
@@ -58,11 +60,18 @@ public enum GestureClassifier: String, CaseIterable, Sendable {
         case .geometryTilt: 7
         case .developingTilt: 8
         case .geometryPinch: 9
+        case .relativeTilt: 10
         }
     }
 
     static func configured(for configuration: ContactTransform.Configuration) -> [Self] {
-        allCases.filter { configuration.usesMotionBoundary || $0 != .developingTilt }
+        allCases.filter {
+            switch $0 {
+            case .developingTilt: configuration.usesMotionBoundary
+            case .relativeTilt: configuration.usesMotionBoundary && configuration.usesRelativeTurn
+            default: true
+            }
+        }
     }
 
     public struct Assessment: Sendable {
@@ -111,7 +120,9 @@ struct GestureClassifierBank: Sendable {
     }
     private var histories: [GestureClassifier: History] = [:]
 
-    mutating func receive(_ signals: [GestureClassifierSignal], at time: TimeInterval) -> [GestureClassifier.Assessment] {
+    mutating func receive(_ signals: [GestureClassifierSignal], at time: TimeInterval,
+                          timingPolicy: ContactTransform.Configuration.TimingPolicy = .sourceClock,
+                          sourceResolution: TimeInterval = 0) -> [GestureClassifier.Assessment] {
         var next: [GestureClassifier: History] = [:]
         let assessments = signals.map { signal in
             var history = histories[signal.classifier] ?? History()
@@ -123,19 +134,31 @@ struct GestureClassifierBank: Sendable {
             if !signal.eligible { history.eligibleSince = nil }
             else if history.eligibleSince == nil { history.eligibleSince = time }
             next[signal.classifier] = history
-            func progress(since: TimeInterval?, duration: TimeInterval) -> Double {
-                guard let since else { return 0 }
-                return duration > 0 ? min(1, max(0, (time - since) / duration)) : 1
+            func timer(since: TimeInterval?, duration: TimeInterval) -> (progress: Double, remaining: TimeInterval, complete: Bool) {
+                let elapsed = since.map { time - $0 } ?? 0
+                let remaining = max(0, duration - elapsed)
+                guard let since else { return (0, remaining, false) }
+                let progress = duration > 0 ? min(1, max(0, elapsed / duration)) : 1
+                switch timingPolicy {
+                case .legacyRelative:
+                    return (progress, remaining, progress >= 1 - 1e-9)
+                case .sourceClock:
+                    // Source subtraction can lose more precision than the small
+                    // accumulated elapsed clock suggests. Allow at least 1 ns,
+                    // adapting to its ULP, while staying below a 1 µs early sample.
+                    let tolerance = min(0.00000025, max(1e-9, sourceResolution + time.ulp + since.ulp))
+                    let complete = remaining <= tolerance
+                    return (complete ? 1 : progress, complete ? 0 : remaining, complete)
+                }
             }
-            let persistence = progress(since: history.eligibleSince, duration: signal.persistence)
-            let observation = progress(since: history.evidenceSince, duration: signal.observationWindow)
-            let progress = signal.eligible ? min(persistence, observation) : 0
+            let persistence = timer(since: history.eligibleSince, duration: signal.persistence)
+            let observation = timer(since: history.evidenceSince, duration: signal.observationWindow)
+            let progress = signal.eligible ? min(persistence.progress, observation.progress) : 0
             return GestureClassifier.Assessment(classifier: signal.classifier,
                 confidence: signal.confidence.isFinite ? min(1, max(0, signal.confidence)) : 0,
-                progress: progress, isReady: signal.eligible && progress >= 1 - 1e-9,
+                progress: progress, isReady: signal.eligible && persistence.complete && observation.complete,
                 checks: signal.checks, prior: signal.prior,
-                persistenceRemaining: max(0, signal.persistence - (history.eligibleSince.map { time - $0 } ?? 0)),
-                observationRemaining: max(0, signal.observationWindow - (history.evidenceSince.map { time - $0 } ?? 0)))
+                persistenceRemaining: persistence.remaining, observationRemaining: observation.remaining)
         }
         histories = next
         return assessments

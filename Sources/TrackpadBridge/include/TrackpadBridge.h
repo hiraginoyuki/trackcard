@@ -10,6 +10,7 @@ extern "C" {
 
 #define TP_MAX_DEVICES 8
 #define TP_MAX_CONTACTS 32
+#define TP_RECOGNITION_CAPACITY 512
 
 typedef struct TPMonitor TPMonitor;
 
@@ -37,6 +38,8 @@ typedef struct {
 typedef struct {
     uint64_t sequence;
     double receivedAt;
+    double callbackAt;
+    uint64_t streamID;
     double sourceTimestamp;
     uint64_t sourceFrame;
     int32_t count;
@@ -54,6 +57,10 @@ const char *TPMonitorError(TPMonitor *monitor);
 void TPMonitorRefresh(TPMonitor *monitor);
 int TPMonitorCopyDevices(TPMonitor *monitor, TPDeviceInfo *devices, int capacity);
 bool TPMonitorCopyFrame(TPMonitor *monitor, uint64_t deviceID, TPFrame *frame);
+// Independently consumed FIFO for recognition, including release/identity changes.
+// Sequence gaps identify the affected device after bounded overflow. Neither
+// snapshot reads nor recording start/stop/drain consume this stream.
+int TPMonitorCopyRecognitionFrames(TPMonitor *monitor, TPRecordedFrame *frames, int capacity, uint64_t *dropped);
 // Opt-in loss-accounted queue, separate from the preview's latest snapshots.
 void TPMonitorSetRecording(TPMonitor *monitor, bool enabled);
 int TPMonitorCopyRecordedFrames(TPMonitor *monitor, TPRecordedFrame *frames, int capacity, uint64_t *dropped);

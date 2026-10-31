@@ -27,9 +27,10 @@ public struct ContactTransformUpdate: Sendable {
 
 /// Uses physical contact geometry, independently of synthesized AppKit gestures.
 public struct ContactTransform: Sendable {
-    public static let version = "motion-boundary-v6"
+    public static let version = "minimum-scale-tilt-v9"
     public struct Configuration: Sendable, Equatable {
         public enum TiltModel: Sendable { case geometry, vectors, vectorsAndAxis, paths }
+        public enum TimingPolicy: Sendable { case legacyRelative, sourceClock }
         public let tiltModel: TiltModel
         public let usesRelativeMotion: Bool
         public let usesEarlyIntent: Bool
@@ -37,13 +38,22 @@ public struct ContactTransform: Sendable {
         /// Apply the radial-travel guard and developing-turn recovery to the
         /// independent classifiers. Historical comparison rules ignore it.
         public let usesMotionBoundary: Bool
+        /// Recognize relative turning during shared movement, and keep the
+        /// geometry fallbacks from claiming that turn before it can persist.
+        public let usesRelativeTurn: Bool
+        /// Historical comparisons retain their original relative tolerance.
+        /// Current timers compare seconds with an allowance for source precision.
+        public let timingPolicy: TimingPolicy
         public let earlyPinchRatio: Double?
         public let earlyPinchDuration: TimeInterval
         public let ambiguityDuration: TimeInterval
+        public let tiltThresholds: TiltThresholds
         public init(earlyPinchRatio: Double? = 0.06, earlyPinchDuration: TimeInterval = 0.032,
                     ambiguityDuration: TimeInterval = 0.096, tiltModel: TiltModel = .geometry,
                     usesRelativeMotion: Bool = true, usesEarlyIntent: Bool = true,
-                    usesIndependentClassifiers: Bool = true, usesMotionBoundary: Bool = true) {
+                    usesIndependentClassifiers: Bool = true, usesMotionBoundary: Bool = true,
+                    usesRelativeTurn: Bool = true, timingPolicy: TimingPolicy = .sourceClock,
+                    tiltThresholds: TiltThresholds = .standard) {
             self.earlyPinchRatio = earlyPinchRatio
             self.earlyPinchDuration = earlyPinchDuration
             self.ambiguityDuration = ambiguityDuration
@@ -52,6 +62,9 @@ public struct ContactTransform: Sendable {
             self.usesEarlyIntent = usesEarlyIntent
             self.usesIndependentClassifiers = usesIndependentClassifiers
             self.usesMotionBoundary = usesMotionBoundary
+            self.usesRelativeTurn = usesRelativeTurn
+            self.timingPolicy = timingPolicy
+            self.tiltThresholds = tiltThresholds
         }
     }
     public let configuration: Configuration
@@ -83,9 +96,11 @@ public struct ContactTransform: Sendable {
     private var peakRadialSpeed: Double = 0
     private var lastSource: TimeInterval?
     private var physicalTime: TimeInterval = 0
+    private var sourceTimeResolution: TimeInterval = 0
     private var lastSampleAngle: Double = 0
     private var accumulatedAngle: Double = 0
     private var pair: [Int32] = []
+    private var pairActionAvailability: GestureActionAvailability?
     private var rejected = false
     private var initialDistance: Double = 0
     private var initialCenter = CGPoint.zero
@@ -117,6 +132,17 @@ public struct ContactTransform: Sendable {
     /// A reversible feedback cue, never a confirmed click or a transform veto.
     public var isPressCandidate: Bool { isTracking && intent == .undecided && assessment.pressScore >= 1 }
 
+    /// A settings change takes effect on the next pair, after any current pair
+    /// releases. Never restart a partly recognized gesture under new thresholds.
+    public mutating func reconfigure(_ configuration: Configuration) -> ContactTransformUpdate? {
+        guard configuration != self.configuration else { return nil }
+        let waitForRelease = !pair.isEmpty || rejected
+        let ended = finish()
+        self = ContactTransform(configuration: configuration)
+        rejected = waitForRelease
+        return ended
+    }
+
     public mutating func interrupt() -> ContactTransformUpdate? {
         let ended = finish()
         rejected = true
@@ -129,7 +155,8 @@ public struct ContactTransform: Sendable {
 
     public mutating func receive(_ contacts: [TransformContact], canBegin: Bool,
                                  at time: TimeInterval? = nil, sourceTimestamp: TimeInterval = 0,
-                                 pointerOverTarget: Bool? = nil) -> ContactTransformUpdate? {
+                                 pointerOverTarget: Bool? = nil,
+                                 actionAvailability: GestureActionAvailability? = nil) -> ContactTransformUpdate? {
         guard contacts.count == 2, contacts[0].id != contacts[1].id,
               contacts.allSatisfy({ $0.positionMM.x.isFinite && $0.positionMM.y.isFinite }) else {
             let preparation = singlePreparation
@@ -170,6 +197,7 @@ public struct ContactTransform: Sendable {
             physicalTime += interval
         }
         lastArrival = arrival; lastSource = source
+        if let source { sourceTimeResolution = max(sourceTimeResolution, source.ulp) }
         let ordered = contacts.sorted { $0.id < $1.id }
         let ids = ordered.map(\.id)
         let vector = CGPoint(x: ordered[1].positionMM.x - ordered[0].positionMM.x,
@@ -181,6 +209,7 @@ public struct ContactTransform: Sendable {
         guard !rejected else { return nil }
         if pair.isEmpty {
             pair = ids
+            pairActionAvailability = actionAvailability
             rejected = !canBegin || distance < 6
             initialDistance = distance
             previousDistance = distance
@@ -224,7 +253,8 @@ public struct ContactTransform: Sendable {
         let measurements = GestureMeasurements(configuration: configuration, initialDistance: initialDistance,
             distance: distance, angle: angleFromStart, translation: translation, pinchMotion: pinchMotion,
             rotationMotion: rotationMotion, minimumContactTravel: min(travel[0], travel[1]),
-            netAlignment: netAlignment, features: features, tiltPrior: tiltPrior, peakRadialSpeed: peakRadialSpeed)
+            netAlignment: netAlignment, features: features, tiltPrior: tiltPrior, peakRadialSpeed: peakRadialSpeed,
+            actionAvailability: pairActionAvailability)
         var pressScore = 0.0
         if configuration.usesEarlyIntent, physicalTime >= 0.008 - 1e-9,
            let first = ordered[0].force, let second = ordered[1].force,
@@ -250,7 +280,8 @@ public struct ContactTransform: Sendable {
         pressPreviewActive = pressScore >= 1
         let decision: Intent?
         if configuration.usesIndependentClassifiers {
-            let classifiers = classifierBank.receive(GestureClassifier.configured(for: configuration).map { $0.signal(for: measurements) }, at: physicalTime)
+            let classifiers = classifierBank.receive(GestureClassifier.configured(for: configuration).map { $0.signal(for: measurements) },
+                at: physicalTime, timingPolicy: configuration.timingPolicy, sourceResolution: sourceTimeResolution)
             assessment = GestureClassifierBank.assessment(classifiers, measurements: measurements, pressScore: pressScore)
             let winner = GestureClassifierBank.winner(in: classifiers)
             decision = mode == nil && !moving ? winner?.intent : nil

@@ -57,7 +57,7 @@ private func turnPair(_ row: (Double, Double, Double, Double), direction: Double
         let sample = current.inspection(at: current.decisionTime).sample!
         let tilt = sample.classifiers.first { $0.classifier == .geometryTilt }!
         #expect(tilt.blockers.contains { $0.contains("Angular versus radial travel") })
-        #expect(current.samples.last?.classifiers.count == 10 && old.samples.last?.classifiers.count == 9)
+        #expect(current.samples.last?.classifiers.count == GestureClassifier.allCases.count && old.samples.last?.classifiers.count == 9)
     }
 }
 

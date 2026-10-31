@@ -1,4 +1,5 @@
 import AppKit
+import TrackpadCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -13,14 +14,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var demoStart: TimeInterval = 0
     private var observers: [NSObjectProtocol] = []
     private var recorder: GestureRecorderController?
+    private var recognitionDelivery = RecognitionDelivery()
+    private let deliveryTrace = RecognitionTrace.fromEnvironment()
     private let snapshotURL: URL?
     private let snapshotDelay: TimeInterval
+    private let tuningURL: URL?
+    private var tiltTuning: TiltTuningController?
 
-    init(snapshotURL: URL? = nil, snapshotDelay: TimeInterval = 1) {
+    init(snapshotURL: URL? = nil, snapshotDelay: TimeInterval = 1, tuningURL: URL? = nil) {
         self.snapshotURL = snapshotURL
         self.snapshotDelay = snapshotDelay
+        self.tuningURL = tuningURL
         self.overlay = OverlayController(offscreen: snapshotURL != nil)
         super.init()
+        overlay.onRightClick = { [weak self] deviceID, time in
+            guard let self else { return }
+            if let recorder = self.recorder { recorder.receiveRightClick(deviceID: deviceID, at: time) }
+            else { self.interruptRecognition(deviceID: deviceID, at: time) }
+        }
+        if let deliveryTrace {
+            overlay.onRecognitionDecision = { deviceID, frame, intent, elapsed in
+                deliveryTrace.decision(deviceID: deviceID, frame: frame, intent: intent, elapsed: elapsed)
+            }
+            overlay.onVisualSubmission = { time, scale, displayedScale, opacity, displayedOpacity in
+                deliveryTrace.visualSubmission(at: time, scale: scale, displayedScale: displayedScale,
+                                               opacity: opacity, displayedOpacity: displayedOpacity)
+            }
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -61,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.frameLoop.stop()
                 self.capture?.close()
                 self.capture = nil
+                self.recognitionDelivery = RecognitionDelivery()
                 self.overlay.resetContacts()
             }
         })
@@ -90,6 +111,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if CommandLine.arguments.contains("--record-gestures"), snapshotURL == nil { showRecorder() }
         if CommandLine.arguments.contains("--compare-classifiers"), snapshotURL == nil, !demo { showClassifiers() }
+        if let tuningURL, snapshotURL == nil, !demo {
+            let tuning = TiltTuningController(datasetURL: tuningURL)
+            tuning.onRightClick = { [weak self] deviceID, time in self?.interruptRecognition(deviceID: deviceID, at: time) }
+            tuning.onThresholdChange = { [weak self] deviceID, time in
+                self?.interruptRecognition(deviceID: deviceID, at: time, nativeClick: false)
+            }
+            tiltTuning = tuning; tuning.setDevices(devices); tuning.show()
+        }
     }
 
     private func refreshDevices() {
@@ -103,7 +132,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             devices = capture?.refresh() ?? []
         }
         overlay.setDevices(devices)
+        recognitionDelivery.setDevices(devices.map(\.id))
         recorder?.setDevices(devices)
+        tiltTuning?.setDevices(devices)
         statusItem.button?.toolTip = devices.isEmpty ? (capture?.error ?? "No trackpads connected") : "Trackcard · \(devices.count) connected"
     }
 
@@ -117,16 +148,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let time = ProcessInfo.processInfo.systemUptime
         if demo { tickDemo(at: time) }
         else {
-            for device in devices {
-                if let frame = capture?.frame(for: device.id) {
-                    overlay.receive(frame, from: device.id)
-                    recorder?.observeContacts(frame, deviceID: device.id)
+            let batch = capture?.recognitionFrames()
+            let deviceIDs = Set(devices.map(\.id))
+            for (deviceID, frame) in batch?.frames ?? [] where deviceIDs.contains(deviceID) {
+                let drainedAt = ProcessInfo.processInfo.systemUptime
+                let receipt = recognitionDelivery.receive(deviceID: deviceID, streamID: frame.streamID,
+                    sequence: frame.sequence, receivedAt: frame.receivedAt, sourceTimestamp: frame.sourceTimestamp,
+                    touchingCount: frame.contacts.filter(\.isTouching).count, drainedAt: drainedAt,
+                    callbackAt: frame.callbackAt > 0 ? frame.callbackAt : nil)
+                deliveryTrace?.frame(deviceID: deviceID, frame: frame, receipt: receipt,
+                                     drainedAt: drainedAt, dropped: batch?.dropped ?? 0)
+                if receipt.interrupted {
+                    overlay.interruptRecognition(deviceID: deviceID)
+                    recorder?.interruptRecognition(deviceID: deviceID)
+                    tiltTuning?.interrupt(deviceID: deviceID)
                 }
+                guard receipt.accepted else { continue }
+                overlay.receive(frame, from: deviceID, recognize: receipt.canRecognize, at: receipt.recognitionTime)
+                recorder?.observeContacts(frame, deviceID: deviceID,
+                    recognize: receipt.canRecognize, at: receipt.recognitionTime)
+                tiltTuning?.receive(frame, deviceID: deviceID, recognize: receipt.canRecognize, at: receipt.recognitionTime,
+                                    pointerOverTarget: overlay.pointerIsOverSurface, actionAvailability: overlay.gestureActionAvailability)
             }
         }
         drainRecordingFrames()
         recorder?.tick(at: time)
         overlay.tick(at: time)
+    }
+
+    private func interruptRecognition(deviceID: UInt64?, at time: TimeInterval, nativeClick: Bool = true) {
+        recognitionDelivery.interrupt(deviceID: deviceID, at: time)
+        for device in devices where deviceID == nil || device.id == deviceID {
+            overlay.interruptRecognition(deviceID: device.id)
+        }
+        if nativeClick { deliveryTrace?.rightClick(deviceID: deviceID, at: time) }
+        tiltTuning?.interrupt(deviceID: deviceID)
     }
 
     private func drainRecordingFrames() {
@@ -142,15 +198,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.capture?.setRecording(enabled)
                 if !enabled { self?.drainRecordingFrames() }
             }
-            recorder.onRecordingChanged = { [weak self] recording in self?.overlay.isRecordingGestures = recording }
+            recorder.onRecordingChanged = { [weak self] recording in
+                self?.overlay.isRecordingGestures = recording
+                self?.tiltTuning?.setRecordingActive(recording)
+            }
             recorder.onReplayStarted = { [weak self] devices in self?.overlay.beginReplay(devices: devices) }
             recorder.onReplayFrame = { [weak self] frame in self?.overlay.replay(frame) }
             recorder.onReplayTime = { [weak self] time in self?.overlay.setReplayTime(time) }
             recorder.onReplaySelectionActive = { [weak self] active in self?.overlay.setReplaySelectionActive(active) }
             recorder.onReplayEnded = { [weak self] in self?.overlay.endReplay() }
-            overlay.onRightClick = { [weak recorder] deviceID, time in recorder?.receiveRightClick(deviceID: deviceID, at: time) }
             recorder.capturePreview = { [overlay] in overlay.previewState() }
             recorder.pointerOverPreview = { [weak self] in self?.overlay.pointerIsOverSurface ?? false }
+            recorder.actionAvailability = { [weak self] in self?.overlay.gestureActionAvailability }
+            recorder.onNativeRightClick = { [weak self] deviceID, time in
+                self?.interruptRecognition(deviceID: deviceID, at: time)
+            }
             overlay.onPreviewState = { [weak recorder] state in recorder?.receivePreview(state) }
             recorder.onReplayPreview = { [weak self] state in self?.overlay.replayPreview(state) }
             self.recorder = recorder

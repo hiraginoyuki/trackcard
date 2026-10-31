@@ -46,7 +46,10 @@ final class OverlayController {
     private var provisionalClone: OverlayController?
     private var cloneIsFading = false
     private var latestContacts: [UInt64: [Contact]] = [:]
+    private var dirtyContacts: Set<UInt64> = []
     var onRightClick: ((UInt64?, TimeInterval) -> Void)?
+    var onRecognitionDecision: ((UInt64, ContactFrame, ContactTransform.Intent, TimeInterval) -> Void)?
+    var onVisualSubmission: ((TimeInterval, Double, Double, Double, Double) -> Void)?
     private var classificationTransitionUntil: TimeInterval = 0
     private var currentScale = defaultScale
     private var resizeMotion = ResizeMotion(scale: defaultScale)
@@ -154,11 +157,11 @@ final class OverlayController {
     }
 
     private func configureGestureView() {
-        gestureView.makeContextMenu = { [weak self] in
+        gestureView.makeContextMenu = { [weak self] time in
             guard let self else { return NSMenu() }
             let owner = self.contactOwner
             self.cancelContactTransform(rejectUntilRelease: true)
-            self.onRightClick?(owner, ProcessInfo.processInfo.systemUptime)
+            self.onRightClick?(owner, time)
             self.adjustment.hapticDeviceID = self.activity.frontID ?? self.devices.first?.id
             return self.adjustment.contextMenu(scale: self.currentScale, opacity: self.currentOpacity,
                 enabled: !self.isRecordingGestures && !self.isReplaying)
@@ -190,6 +193,8 @@ final class OverlayController {
         guard self.devices != devices else { return }
         self.devices = devices
         let ids = Set(devices.map(\.id))
+        latestContacts = latestContacts.filter { ids.contains($0.key) }
+        dirtyContacts.formIntersection(ids)
         if let contactOwner, !ids.contains(contactOwner) { cancelContactTransform() }
         contactTransforms = contactTransforms.filter { ids.contains($0.key) }
         for id in Array(cards.keys) where !ids.contains(id) {
@@ -343,26 +348,42 @@ final class OverlayController {
         }
     }
 
-    func receive(_ frame: ContactFrame, from deviceID: UInt64) {
+    var gestureActionAvailability: GestureActionAvailability? {
+        GestureActionAvailability(scale: currentScale, opacity: Double(currentOpacity),
+            minimumScale: Self.minimumScale, maximumScale: Self.maximumScale, minimumOpacity: 0.15)
+    }
+
+    func receive(_ frame: ContactFrame, from deviceID: UInt64, recognize: Bool = true, at recognitionTime: TimeInterval? = nil) {
         guard !isReplaying else { return }
         latestContacts[deviceID] = frame.contacts
-        cards[deviceID]?.update(contacts: frame.contacts)
-        provisionalClone?.cards[deviceID]?.update(contacts: frame.contacts)
+        dirtyContacts.insert(deviceID)
         if contactOwner == nil || contactOwner == deviceID {
             adjustment.hapticDeviceID = deviceID
             adjustment.hapticContactTime = frame.contacts.contains(where: \.isTouching) ? frame.receivedAt : -.infinity
         }
         activity.receive(deviceID: deviceID, hasContact: frame.contacts.contains(where: \.isTouching), at: frame.receivedAt)
-        guard !isRecordingGestures, !offscreen, isVisible, let device = devices.first(where: { $0.id == deviceID }) else { return }
+        guard recognize, !isRecordingGestures, !offscreen, isVisible,
+              let device = devices.first(where: { $0.id == deviceID }) else { return }
         let point = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
         let canBegin = contactOwner == nil && !dock.tucked && !restoringFromTab && containsSurface(point)
         let contacts = frame.contacts.filter(\.isTouching).map {
             TransformContact(id: $0.id, positionMM: CGPoint(x: $0.position.x * device.sizeMM.width,
                                                           y: $0.position.y * device.sizeMM.height), orientation: Double($0.angle), radiiMM: $0.radiiMM, force: Double($0.force))
         }
-        var transform = contactTransforms[deviceID] ?? ContactTransform()
-        let update = transform.receive(contacts, canBegin: canBegin, at: frame.receivedAt, sourceTimestamp: frame.sourceTimestamp)
+        let configuration = ContactTransform.Configuration(tiltThresholds: ClassifierTuningStore.shared.thresholds(for: deviceID))
+        if contactTransforms[deviceID]?.configuration != configuration, contactOwner == deviceID {
+            cancelContactTransform(rejectUntilRelease: true)
+        }
+        var transform = contactTransforms[deviceID] ?? ContactTransform(configuration: configuration)
+        _ = transform.reconfigure(configuration)
+        let previousIntent = transform.intent
+        let update = transform.receive(contacts, canBegin: canBegin, at: recognitionTime ?? frame.receivedAt,
+                                       sourceTimestamp: frame.sourceTimestamp, pointerOverTarget: containsSurface(point),
+                                       actionAvailability: gestureActionAvailability)
         contactTransforms[deviceID] = transform
+        if previousIntent == .undecided && transform.intent != .undecided {
+            onRecognitionDecision?(deviceID, frame, transform.intent, transform.elapsed)
+        }
         if contactOwner == nil && transform.isTracking { contactOwner = deviceID }
         guard contactOwner == deviceID else { return }
         adjustment.hapticDeviceID = deviceID
@@ -490,7 +511,23 @@ final class OverlayController {
         gestureView.setContactTracking(false, transforming: false)
     }
 
+    func interruptRecognition(deviceID: UInt64) {
+        if contactOwner == deviceID { cancelContactTransform(rejectUntilRelease: true) }
+        else if var transform = contactTransforms[deviceID] {
+            _ = transform.interrupt()
+            contactTransforms[deviceID] = transform
+        }
+    }
+
     func tick(at time: TimeInterval) {
+        if !isReplaying {
+            for id in dirtyContacts {
+                let contacts = latestContacts[id] ?? []
+                cards[id]?.update(contacts: contacts)
+                provisionalClone?.cards[id]?.update(contacts: contacts)
+            }
+        }
+        dirtyContacts.removeAll(keepingCapacity: true)
         if contactOwner != nil && time - lastContactFrame > 0.25 { cancelContactTransform(rejectUntilRelease: true) }
         if adjustment.isProvisional, let contactOwner, let transform = contactTransforms[contactOwner] {
             if transform.isPressCandidate { suppressProvisionalForPress(at: time) }
@@ -516,6 +553,7 @@ final class OverlayController {
         if isRecordingGestures || isReplaying { updateStatusGlow() }
         // Commit contacts even while AppKit is servicing a nested gesture mode.
         CATransaction.flush()
+        onVisualSubmission?(time, currentScale, resizeMotion.scale, currentOpacity, panel.alphaValue)
         if isRecordingGestures { onPreviewState?(previewState(at: time)) }
     }
 
@@ -847,6 +885,8 @@ final class OverlayController {
         cancelContactTransform()
         finishResize()
         contactTransforms.removeAll()
+        latestContacts.removeAll()
+        dirtyContacts.removeAll()
         activity = TrackpadActivity()
         activity.setDevices(devices.map(\.id))
         for card in cards.values { card.resetContacts() }

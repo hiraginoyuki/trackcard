@@ -3,9 +3,9 @@ import TrackpadCore
 
 @MainActor
 private final class ConfidenceWindow: NSWindow {
-    var onRightClick: (() -> Void)?
+    var onRightClick: ((TimeInterval) -> Void)?
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .rightMouseDown { onRightClick?() }
+        if event.type == .rightMouseDown { onRightClick?(event.timestamp) }
         super.sendEvent(event)
     }
 }
@@ -183,7 +183,7 @@ private final class ConfidenceChartsView: NSView {
 
 @MainActor
 final class ClassifierComparisonController: NSObject {
-    var onRightClick: ((UInt64?) -> Void)?
+    var onRightClick: ((UInt64?, TimeInterval) -> Void)?
     var pointerOverPreview: (() -> Bool)?
     private let window: NSWindow
     private let charts = ConfidenceChartsView()
@@ -205,10 +205,10 @@ final class ClassifierComparisonController: NSObject {
         window = ConfidenceWindow(contentRect: NSRect(x: 0, y: 0, width: 1050, height: 830),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         super.init()
-        (window as? ConfidenceWindow)?.onRightClick = { [weak self] in
+        (window as? ConfidenceWindow)?.onRightClick = { [weak self] time in
             guard let self, !self.replaying else { return }
-            if let onRightClick = self.onRightClick { onRightClick(self.selectedDeviceID) }
-            else { self.comparison.receiveRightClick() }
+            if let onRightClick = self.onRightClick { onRightClick(self.selectedDeviceID, time) }
+            else { self.comparison.receiveRightClick(at: time) }
         }
         window.title = "Classifier Comparison"
         window.minSize = NSSize(width: 840, height: 500)
@@ -308,26 +308,43 @@ final class ClassifierComparisonController: NSObject {
         replaying = false; sourceTitle += " · stopped"; updateDevices(liveDevices)
         comparison.finish(); lastRevision = nil
     }
-    func receive(_ frame: ContactFrame, deviceID: UInt64) {
+    func receive(_ frame: ContactFrame, deviceID: UInt64, at time: TimeInterval? = nil,
+                 actionAvailability: GestureActionAvailability? = nil) {
         guard !replaying else { return }
         if frame.contacts.filter(\.isTouching).count == 2 { sourceTitle = "Live" }
-        ingest(deviceID: deviceID, time: frame.receivedAt, source: frame.sourceTimestamp,
-               contacts: frame.contacts.filter(\.isTouching).map { ($0.id, $0.position, Double($0.angle), $0.radiiMM, Double($0.force)) }, pointerOverTarget: pointerOverPreview?())
+        ingest(deviceID: deviceID, time: time ?? frame.receivedAt, source: frame.sourceTimestamp,
+               contacts: frame.contacts.filter(\.isTouching).map { ($0.id, $0.position, Double($0.angle), $0.radiiMM, Double($0.force)) },
+               pointerOverTarget: pointerOverPreview?(), actionAvailability: actionAvailability)
     }
     func receive(_ frame: RecordedContactFrame) {
         guard replaying else { return }
         ingest(deviceID: frame.deviceID, time: frame.time, source: frame.sourceTimestamp,
-               contacts: frame.contacts.filter { $0.stage == 3 || $0.stage == 4 }.map { ($0.id, $0.position, Double($0.angle), $0.radiiMM, Double($0.force)) }, pointerOverTarget: frame.pointerOverPreview)
+               contacts: frame.contacts.filter { $0.stage == 3 || $0.stage == 4 }.map { ($0.id, $0.position, Double($0.angle), $0.radiiMM, Double($0.force)) },
+               pointerOverTarget: frame.pointerOverPreview, actionAvailability: frame.actionAvailability)
     }
     func receiveRightClick(deviceID: UInt64?, at time: TimeInterval? = nil) {
         guard deviceID == nil || selectedDeviceID == deviceID else { return }
         comparison.receiveRightClick(at: time)
     }
+    func interruptRecognition(deviceID: UInt64) {
+        guard selectedDeviceID == deviceID else { return }
+        comparison.finish()
+        sourceTitle = "Live · input interrupted"
+        lastRevision = nil
+    }
     private func ingest(deviceID: UInt64, time: TimeInterval, source: TimeInterval,
-                        contacts: [(Int32, CGPoint, Double, CGSize, Double)], pointerOverTarget: Bool?) {
+                        contacts: [(Int32, CGPoint, Double, CGSize, Double)], pointerOverTarget: Bool?,
+                        actionAvailability: GestureActionAvailability?) {
         guard window.isVisible, deviceID == selectedDeviceID, let device = devices.first(where: { $0.id == deviceID }) else { return }
+        let thresholds = ClassifierTuningStore.shared.thresholds(for: deviceID)
+        if comparison.traces.last?.variant.configuration.tiltThresholds != thresholds {
+            comparison.reconfigure(variants: ClassifierVariant.withTuning(thresholds))
+            charts.setFrameSize(NSSize(width: charts.frame.width, height: CGFloat((comparison.traces.count + 1) / 2) * 176 + 12))
+            lastRevision = nil
+        }
         comparison.receive(contacts.map { TransformContact(id: $0.0, positionMM: CGPoint(x: $0.1.x * device.sizeMM.width, y: $0.1.y * device.sizeMM.height), orientation: $0.2, radiiMM: $0.3, force: $0.4) },
-                           at: time, sourceTimestamp: source, pointerOverTarget: pointerOverTarget)
+                           at: time, sourceTimestamp: source, pointerOverTarget: pointerOverTarget,
+                           actionAvailability: actionAvailability)
     }
     func tick(at time: TimeInterval) {
         guard window.isVisible, freeze.state != .on, time - lastDraw >= 0.05, lastRevision != comparison.revision else { return }

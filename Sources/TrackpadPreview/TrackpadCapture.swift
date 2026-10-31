@@ -47,12 +47,15 @@ struct ContactFrame {
     let contacts: [Contact]
     var sourceTimestamp: TimeInterval = 0
     var sourceFrame: UInt64 = 0
+    var callbackAt: TimeInterval = 0
+    var streamID: UInt64 = 0
 }
 
 @MainActor
 final class TrackpadCapture {
     private let monitor: OpaquePointer
     private var sequences: [UInt64: UInt64] = [:]
+    private var recognitionBuffer = [TPRecordedFrame](repeating: TPRecordedFrame(), count: Int(TP_RECOGNITION_CAPACITY))
 
     init() { monitor = TPMonitorCreate()! }
 
@@ -93,6 +96,13 @@ final class TrackpadCapture {
 
     func setRecording(_ enabled: Bool) { TPMonitorSetRecording(monitor, enabled) }
 
+    func recognitionFrames() -> (frames: [(UInt64, ContactFrame)], dropped: UInt64) {
+        // One bounded snapshot per drain. New callbacks remain for the next tick.
+        var dropped: UInt64 = 0
+        let count = Int(TPMonitorCopyRecognitionFrames(monitor, &recognitionBuffer, Int32(recognitionBuffer.count), &dropped))
+        return (recognitionBuffer.prefix(count).map { ($0.deviceID, Self.decode($0.frame)) }, dropped)
+    }
+
     func recordedFrames() -> (frames: [(UInt64, ContactFrame)], dropped: UInt64) {
         var buffer = [TPRecordedFrame](repeating: TPRecordedFrame(), count: 64)
         var frames: [(UInt64, ContactFrame)] = []
@@ -119,7 +129,8 @@ final class TrackpadCapture {
             }
         }
         return ContactFrame(sequence: frame.sequence, receivedAt: frame.receivedAt, contacts: contacts,
-                            sourceTimestamp: frame.sourceTimestamp, sourceFrame: frame.sourceFrame)
+                            sourceTimestamp: frame.sourceTimestamp, sourceFrame: frame.sourceFrame,
+                            callbackAt: frame.callbackAt, streamID: frame.streamID)
     }
 
     func close() { TPMonitorDestroy(monitor) }

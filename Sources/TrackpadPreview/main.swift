@@ -19,17 +19,18 @@ if CommandLine.arguments.contains("--diagnose") {
         }
         var totalFrames = 0
         var maximumContacts = 0
+        var droppedFrames: UInt64 = 0
         let end = ProcessInfo.processInfo.systemUptime + 3
         while ProcessInfo.processInfo.systemUptime < end {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 1 / 120))
-            for device in devices {
-                if let frame = capture.frame(for: device.id) {
-                    totalFrames += 1
-                    maximumContacts = max(maximumContacts, frame.contacts.filter(\.isTouching).count)
-                }
+            let batch = capture.recognitionFrames()
+            droppedFrames = batch.dropped
+            totalFrames += batch.frames.count
+            for (_, frame) in batch.frames {
+                maximumContacts = max(maximumContacts, frame.contacts.filter(\.isTouching).count)
             }
         }
-        print("\(devices.count) trackpad(s), \(totalFrames) frame snapshots, maximum \(maximumContacts) active contact(s).")
+        print("\(devices.count) trackpad(s), \(totalFrames) ordered frames, maximum \(maximumContacts) active contact(s), \(droppedFrames) dropped frames.")
         if devices.isEmpty { exit(2) }
     }
 } else {
@@ -43,6 +44,7 @@ if CommandLine.arguments.contains("--diagnose") {
         return arguments[index + 1]
     }
     let snapshotPath = optionValue("--snapshot")
+    let tuningPath = optionValue("--tune-tilt")
     let delayText = optionValue("--snapshot-delay") ?? "1"
     guard let delay = Double(delayText), delay.isFinite, (0...60).contains(delay) else {
         fputs("--snapshot-delay must be between 0 and 60 seconds.\n", stderr)
@@ -54,7 +56,8 @@ if CommandLine.arguments.contains("--diagnose") {
         exit(64)
     }
     let app = NSApplication.shared
-    let delegate = AppDelegate(snapshotURL: snapshotPath.map { URL(fileURLWithPath: $0) }, snapshotDelay: delay)
+    let delegate = AppDelegate(snapshotURL: snapshotPath.map { URL(fileURLWithPath: $0) }, snapshotDelay: delay,
+                               tuningURL: tuningPath.map { URL(fileURLWithPath: $0) })
     app.delegate = delegate
     app.run()
 }

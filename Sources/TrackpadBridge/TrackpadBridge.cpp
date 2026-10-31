@@ -52,7 +52,14 @@ double uptime() {
 struct RecordingBuffer {
     bool enabled = false;
     uint64_t dropped = 0;
+    size_t capacity = 2048;
     std::deque<TPRecordedFrame> frames;
+
+    void append(uint64_t deviceID, const TPFrame &frame) {
+        if (!enabled) return;
+        if (frames.size() >= capacity) { frames.pop_front(); ++dropped; }
+        frames.push_back({deviceID, frame});
+    }
 };
 
 struct Device {
@@ -63,6 +70,7 @@ struct Device {
     bool registered = false;
     bool started = false;
     std::shared_ptr<RecordingBuffer> recording;
+    std::shared_ptr<RecordingBuffer> recognition;
     ~Device() { if (ref) CFRelease(ref); }
 };
 
@@ -72,6 +80,7 @@ uintptr_t nextToken = 0;
 
 int receiveFrame(void *ref, const NativeContact *contacts, int count,
                  double timestamp, uint64_t sourceFrame, void *context) {
+    const double callbackAt = uptime();
     if (count < 0 || count > TP_MAX_CONTACTS || (count && !contacts) || !std::isfinite(timestamp)) return 0;
     std::lock_guard<std::mutex> lock(registryLock);
     auto found = registry.find(reinterpret_cast<uintptr_t>(context));
@@ -79,6 +88,8 @@ int receiveFrame(void *ref, const NativeContact *contacts, int count,
     auto &frame = found->second->frame;
     frame.count = 0;
     frame.receivedAt = uptime();
+    frame.callbackAt = callbackAt;
+    frame.streamID = found->second->token;
     frame.sourceTimestamp = timestamp;
     frame.sourceFrame = sourceFrame;
     ++frame.sequence;
@@ -96,10 +107,9 @@ int receiveFrame(void *ref, const NativeContact *contacts, int count,
                std::isfinite(c.density) ? c.density : 0.0f, c.classification};
     }
     auto &recording = found->second->recording;
-    if (recording && recording->enabled) {
-        if (recording->frames.size() >= 2048) { recording->frames.pop_front(); ++recording->dropped; }
-        recording->frames.push_back({found->second->info.id, frame});
-    }
+    if (recording) recording->append(found->second->info.id, frame);
+    auto &recognition = found->second->recognition;
+    if (recognition) recognition->append(found->second->info.id, frame);
     return 0;
 }
 
@@ -160,6 +170,12 @@ struct TPMonitor {
     int (*stop)(DeviceRef) = nullptr;
     std::vector<std::shared_ptr<Device>> devices;
     std::shared_ptr<RecordingBuffer> recording = std::make_shared<RecordingBuffer>();
+    std::shared_ptr<RecordingBuffer> recognition = [] {
+        auto buffer = std::make_shared<RecordingBuffer>();
+        buffer->enabled = true;
+        buffer->capacity = TP_RECOGNITION_CAPACITY;
+        return buffer;
+    }();
     std::mutex devicesLock;
     std::string error;
     std::thread worker;
@@ -308,6 +324,7 @@ void TPMonitor::refresh() {
         std::snprintf(device->info.name, sizeof(device->info.name), "%s", name.c_str());
         readColor(service, device->info);
         device->recording = monitor->recording;
+        device->recognition = monitor->recognition;
         {
             std::lock_guard<std::mutex> lock(registryLock);
             device->token = ++nextToken;
@@ -359,6 +376,16 @@ int TPMonitorCopyRecordedFrames(TPMonitor *monitor, TPRecordedFrame *frames, int
     if (!monitor || !frames || capacity <= 0) return 0;
     std::lock_guard<std::mutex> lock(registryLock);
     auto &buffer = *monitor->recording;
+    if (dropped) *dropped = buffer.dropped;
+    int count = std::min<int>(capacity, static_cast<int>(buffer.frames.size()));
+    for (int i = 0; i < count; ++i) { frames[i] = buffer.frames.front(); buffer.frames.pop_front(); }
+    return count;
+}
+
+int TPMonitorCopyRecognitionFrames(TPMonitor *monitor, TPRecordedFrame *frames, int capacity, uint64_t *dropped) {
+    if (!monitor || !frames || capacity <= 0) return 0;
+    std::lock_guard<std::mutex> lock(registryLock);
+    auto &buffer = *monitor->recognition;
     if (dropped) *dropped = buffer.dropped;
     int count = std::min<int>(capacity, static_cast<int>(buffer.frames.size()));
     for (int i = 0; i < count; ++i) { frames[i] = buffer.frames.front(); buffer.frames.pop_front(); }

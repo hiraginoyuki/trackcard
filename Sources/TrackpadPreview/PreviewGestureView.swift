@@ -8,7 +8,7 @@ final class PreviewGestureView: NSView {
     var onDrag: ((CGPoint, CGPoint, NSEvent.Phase) -> Void)?
     var onSwipe: ((CGPoint) -> Void)?
     var onClick: ((CGPoint) -> Bool)?
-    var makeContextMenu: (() -> NSMenu)?
+    var makeContextMenu: ((TimeInterval) -> NSMenu)?
     var usesContactTransforms = false
     private var contactTracking = false
     private var contactTransforming = false
@@ -165,7 +165,7 @@ final class PreviewGestureView: NSView {
         onSwipe?(CGPoint(x: event.deltaX, y: event.deltaY))
     }
     override func menu(for event: NSEvent) -> NSMenu? {
-        if let menu = makeContextMenu?() { return menu }
+        if let menu = makeContextMenu?(event.timestamp) { return menu }
         let menu = NSMenu()
         let quit = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         quit.target = NSApp

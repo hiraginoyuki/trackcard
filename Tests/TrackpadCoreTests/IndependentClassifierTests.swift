@@ -211,7 +211,8 @@ private func independentPair(span: Double = 40, degrees: Double = 0,
     _ = transform.receive(independentPair(), canBegin: true, at: 0.016)
     _ = transform.receive(independentPair(degrees: 3), canBegin: true, at: 0.024)
     let tilt = transform.assessment.classifiers.filter { $0.classifier.intent == .rotation }
-    #expect(tilt.count == 4 && tilt.allSatisfy { $0.prior == 0.05 && !$0.isReady })
+    #expect(tilt.count == GestureClassifier.allCases.filter { $0.intent == .rotation }.count)
+    #expect(tilt.allSatisfy { $0.prior == 0.05 && !$0.isReady })
     #expect(tilt.allSatisfy { $0.blockers.contains { $0.contains("after prior") } })
 }
 

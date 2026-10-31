@@ -78,14 +78,17 @@ def export(directory, sessions, ignored, output):
                 # Removing them would hide lifts, third fingers, or replacement
                 # paths and give the classifier evidence it cannot see live.
                 active = sorted((c for c in frame["contacts"] if c["stage"] in (3, 4)), key=lambda c: c["id"])
-                frames.append({"arrival": frame["time"], "sensor": frame["sourceTimestamp"],
-                               "ids": [c["id"] for c in active],
-                               "points": [[c["position"][0] * device["sizeMM"][0],
-                                           c["position"][1] * device["sizeMM"][1]] for c in active],
-                               "orientations": [c["angle"] for c in active],
-                               "radii": [c["radiiMM"] for c in active],
-                               "forces": [c.get("force", 0) for c in active],
-                               "pointerOverPreview": frame.get("pointerOverPreview")})
+                exported_frame = {"arrival": frame["time"], "sensor": frame["sourceTimestamp"],
+                                  "ids": [c["id"] for c in active],
+                                  "points": [[c["position"][0] * device["sizeMM"][0],
+                                              c["position"][1] * device["sizeMM"][1]] for c in active],
+                                  "orientations": [c["angle"] for c in active],
+                                  "radii": [c["radiiMM"] for c in active],
+                                  "forces": [c.get("force", 0) for c in active],
+                                  "pointerOverPreview": frame.get("pointerOverPreview")}
+                if "actionAvailability" in frame:
+                    exported_frame["actionAvailability"] = frame["actionAvailability"]
+                frames.append(exported_frame)
             if not frames:
                 raise ValueError(f"{group_ref} has no raw frames")
             examples.append({"ref": group_ref, "session": session, "label": group["category"]["label"],
